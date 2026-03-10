@@ -200,3 +200,10 @@ class Database:
         ).fetchone()['cnt']
         conn.close()
         return {'users': users, 'screenshots': screenshots, 'voters': voters}
+
+    def get_all_users(self):
+        """Barcha foydalanuvchilar ro'yxati broadcast uchun"""
+        conn = self.get_conn()
+        rows = conn.execute('SELECT user_id FROM users').fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
