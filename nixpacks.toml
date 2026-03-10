@@ -1,0 +1,12 @@
+[phases.setup]
+nixPkgs = ["python311", "gcc"]
+
+[start]
+cmd = "python bot.py"
+```
+
+**3. `runtime.txt` — yangi fayl yarating:**
+- Fayl nomi: `runtime.txt`
+- Ichiga:
+```
+python-3.11.9
