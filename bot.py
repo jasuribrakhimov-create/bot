@@ -1,5 +1,6 @@
 import logging
 import os
+import asyncio
 from dotenv import load_dotenv
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
@@ -21,6 +22,27 @@ logger = logging.getLogger(__name__)
 
 db = Database()
 
+# ==================== BROADCAST HELPER ====================
+
+async def broadcast_to_all(context, message: str):
+    """Barcha foydalanuvchilarga xabar yuborish"""
+    users = db.get_all_users()
+    sent = 0
+    failed = 0
+    for user in users:
+        try:
+            await context.bot.send_message(
+                chat_id=user['user_id'],
+                text=message,
+                parse_mode='HTML'
+            )
+            sent += 1
+            await asyncio.sleep(0.05)  # Flood limitdan himoya
+        except Exception as e:
+            failed += 1
+            logger.error(f"Xabar yuborishda xato {user['user_id']}: {e}")
+    return sent, failed
+
 # ==================== USER HANDLERS ====================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -33,8 +55,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     settings = db.get_settings()
     welcome_text = settings.get('welcome_text',
-        "🏛 <b>DLS Ismoilovning OpenBudget Ovoz Berish Botiga Xush Kelibsiz!</b>\n\n"
-        "Ushbu bot orqali siz loyihalarga ovoz berishingiz mumkin. Ovoz bering va sovg'alarga ega bo'ling. \n\n"
+        "🏛 <b>OpenBudget Ovoz Berish Botiga Xush Kelibsiz!</b>\n\n"
+        "Ushbu bot orqali siz ochiq byudjet loyihalariga ovoz berishingiz mumkin.\n\n"
         "Quyidagi tugmalardan birini tanlang:"
     )
     keyboard = [
@@ -179,6 +201,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 def build_admin_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔗 Ovoz Berish Linkini O'zgartirish", callback_data="admin_set_link")],
+        [InlineKeyboardButton("🗑 Linkni O'chirish", callback_data="admin_delete_link")],
         [InlineKeyboardButton("📝 Xush Kelibsiz Matni", callback_data="admin_set_welcome")],
         [InlineKeyboardButton("📋 Ma'lumotlar Matni", callback_data="admin_set_info")],
         [InlineKeyboardButton("🎬 Video Qo'llanma Yuklash", callback_data="admin_set_video")],
@@ -187,14 +210,19 @@ def build_admin_keyboard():
             InlineKeyboardButton("👥 Foydalanuvchilar", callback_data="admin_users_p1"),
         ],
         [InlineKeyboardButton("📸 Screenshotlar", callback_data="admin_screenshots_p1")],
+        [InlineKeyboardButton("📢 Xabar Yuborish", callback_data="admin_broadcast")],
         [InlineKeyboardButton("🔐 Adminlar Boshqaruvi", callback_data="admin_manage")],
     ])
 
 
 def get_admin_panel_text():
     stats = db.get_stats()
+    settings = db.get_settings()
+    link = settings.get('vote_link', '')
+    link_status = f"✅ <b>Aktiv:</b> {link[:40]}..." if link else "❌ <b>Link yo'q</b>"
     return (
         f"⚙️ <b>Admin Panel</b>\n\n"
+        f"🔗 Ovoz berish linki: {link_status}\n\n"
         f"👥 Jami foydalanuvchilar: <b>{stats['users']}</b>\n"
         f"📸 Jami screenshotlar: <b>{stats['screenshots']}</b>\n"
         f"🗳 Ovoz berganlar (unique): <b>{stats['voters']}</b>"
@@ -232,6 +260,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
     await query.answer()
     data = query.data
 
+    # --- Link o'zgartirish ---
     if data == "admin_set_link":
         context.user_data['admin_action'] = 'set_link'
         await query.message.reply_text(
@@ -239,24 +268,81 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             parse_mode='HTML'
         )
 
+    # --- Linkni o'chirish va hammaga xabar ---
+    elif data == "admin_delete_link":
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Ha, o'chir", callback_data="admin_confirm_delete_link"),
+                InlineKeyboardButton("❌ Yo'q", callback_data="admin_back"),
+            ]
+        ]
+        await query.message.reply_text(
+            "⚠️ <b>Diqqat!</b>\n\n"
+            "Linkni o'chirsangiz, barcha foydalanuvchilarga:\n\n"
+            "<i>«Eski loyihamizga ovozlar soni to'ldi. Hozirgi vaqtdan boshlab eski loyihaga "
+            "berilgan ovozlar qabul qilinmadi. Yangi loyiha joylanguncha kutinglar.»</i>\n\n"
+            "degan xabar yuboriladi. Davom etasizmi?",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    elif data == "admin_confirm_delete_link":
+        # Linkni o'chirish
+        db.update_setting('vote_link', '')
+        await query.message.reply_text(
+            "🗑 Link o'chirildi. Barcha foydalanuvchilarga xabar yuborilmoqda...\n"
+            "⏳ Iltimos kuting...",
+            parse_mode='HTML'
+        )
+        # Broadcast
+        msg = (
+            "🔔 <b>Muhim Xabar!</b>\n\n"
+            "⏰ Eski loyihamizga ovozlar soni to'ldi.\n\n"
+            "Hozirgi vaqtdan boshlab eski loyihaga berilgan ovozlar "
+            "<b>qabul qilinmadi</b>.\n\n"
+            "🕐 Yangi loyiha joylanguncha kutinglar.\n\n"
+    
+        )
+        sent, failed = await broadcast_to_all(context, msg)
+        await query.message.reply_text(
+            f"✅ Xabar yuborildi!\n\n"
+            f"📤 Muvaffaqiyatli: <b>{sent}</b>\n"
+            f"❌ Yuborilmadi: <b>{failed}</b>",
+            parse_mode='HTML',
+            reply_markup=build_admin_keyboard()
+        )
+
+    # --- Xush kelibsiz matni ---
     elif data == "admin_set_welcome":
         context.user_data['admin_action'] = 'set_welcome'
         await query.message.reply_text(
-            "📝 <b>Yangi xush kelibsiz matnini yuboring:</b>\nHTML mumkin: &lt;b&gt;, &lt;i&gt;, &lt;code&gt;",
+            "📝 <b>Yangi xush kelibsiz matnini yuboring:</b>",
             parse_mode='HTML'
         )
 
+    # --- Ma'lumotlar matni ---
     elif data == "admin_set_info":
         context.user_data['admin_action'] = 'set_info'
         await query.message.reply_text(
-            "📋 <b>Yangi ma'lumotlar matnini yuboring:</b>\nHTML mumkin: &lt;b&gt;, &lt;i&gt;, &lt;code&gt;",
+            "📋 <b>Yangi ma'lumotlar matnini yuboring:</b>",
             parse_mode='HTML'
         )
 
+    # --- Video ---
     elif data == "admin_set_video":
         context.user_data['admin_action'] = 'set_video'
         await query.message.reply_text(
             "🎬 <b>Video faylini yuboring (MP4):</b>",
+            parse_mode='HTML'
+        )
+
+    # --- Broadcast ---
+    elif data == "admin_broadcast":
+        context.user_data['admin_action'] = 'broadcast'
+        await query.message.reply_text(
+            "📢 <b>Barcha foydalanuvchilarga xabar:</b>\n\n"
+            "Yubormoqchi bo'lgan matnni yozing:\n"
+            "(HTML mumkin: &lt;b&gt;, &lt;i&gt;)",
             parse_mode='HTML'
         )
 
@@ -299,13 +385,11 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
                     f"   {uname} | ID: <code>{v['user_id']}</code>\n"
                     f"   🗳 Ovozlar soni: <b>{v['vote_count']} ta</b>\n\n"
                 )
-
         nav = []
         if page > 1:
             nav.append(InlineKeyboardButton("⬅️ Oldingi", callback_data=f"admin_users_p{page-1}"))
         if page < total_pages:
             nav.append(InlineKeyboardButton("➡️ Keyingi", callback_data=f"admin_users_p{page+1}"))
-
         keyboard = []
         if nav:
             keyboard.append(nav)
@@ -331,13 +415,11 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
                     f"{i}. <b>{s['full_name']}</b> {uname}\n"
                     f"   ID: <code>{s['user_id']}</code> | 📅 {s['created_at']}\n\n"
                 )
-
         nav = []
         if page > 1:
             nav.append(InlineKeyboardButton("⬅️ Oldingi", callback_data=f"admin_screenshots_p{page-1}"))
         if page < total_pages:
             nav.append(InlineKeyboardButton("➡️ Keyingi", callback_data=f"admin_screenshots_p{page+1}"))
-
         keyboard = []
         if nav:
             keyboard.append(nav)
@@ -388,9 +470,31 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if not text.startswith('http'):
             await update.message.reply_text("❌ Link https:// bilan boshlanishi kerak!")
             return
+        old_link = db.get_settings().get('vote_link', '')
         db.update_setting('vote_link', text)
-        await update.message.reply_text("✅ Ovoz berish linki yangilandi!")
         context.user_data['admin_action'] = None
+
+        # Agar oldin link bo'lmagan bo'lsa yoki yangi link bo'lsa — broadcast
+        await update.message.reply_text(
+            "✅ Link yangilandi!\n\n"
+            "⏳ Barcha foydalanuvchilarga xabar yuborilmoqda...",
+            parse_mode='HTML'
+        )
+        msg = (
+            "🎉 <b>Yangi Loyiha Joylandi!</b>\n\n"
+            "✅ Yangi loyihamiz joylandi, ovoz berishingiz mumkin!\n\n"
+            "👇 Ovoz berish uchun botga qayting va "
+            "<b>🗳 Ovoz Berish</b> tugmasini bosing.\n\n"
+            "Hurmat bilan, <b>OpenBudget jamoasi</b> 🏛"
+        )
+        sent, failed = await broadcast_to_all(context, msg)
+        await update.message.reply_text(
+            f"✅ Xabar yuborildi!\n\n"
+            f"📤 Muvaffaqiyatli: <b>{sent}</b>\n"
+            f"❌ Yuborilmadi: <b>{failed}</b>",
+            parse_mode='HTML',
+            reply_markup=build_admin_keyboard()
+        )
 
     elif action == 'set_welcome':
         db.update_setting('welcome_text', text)
@@ -400,6 +504,21 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     elif action == 'set_info':
         db.update_setting('info_text', text)
         await update.message.reply_text("✅ Ma'lumotlar matni yangilandi!")
+        context.user_data['admin_action'] = None
+
+    elif action == 'broadcast':
+        await update.message.reply_text(
+            "📢 Xabar yuborilmoqda...\n⏳ Iltimos kuting...",
+            parse_mode='HTML'
+        )
+        sent, failed = await broadcast_to_all(context, text)
+        await update.message.reply_text(
+            f"✅ Xabar yuborildi!\n\n"
+            f"📤 Muvaffaqiyatli: <b>{sent}</b>\n"
+            f"❌ Yuborilmadi: <b>{failed}</b>",
+            parse_mode='HTML',
+            reply_markup=build_admin_keyboard()
+        )
         context.user_data['admin_action'] = None
 
     elif action == 'add_admin':
@@ -438,6 +557,14 @@ async def admin_video_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("❌ Iltimos, video fayl yuboring!")
 
 
+async def admin_panel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not db.is_admin(user.id):
+        await update.message.reply_text("❌ Sizda admin huquqi yo'q.")
+        return
+    await show_admin_panel(update, context)
+
+
 # ==================== MAIN ====================
 
 def main():
@@ -463,14 +590,6 @@ def main():
 
     print("🤖 OpenBudget Bot ishga tushdi...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
-
-
-async def admin_panel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if not db.is_admin(user.id):
-        await update.message.reply_text("❌ Sizda admin huquqi yo'q.")
-        return
-    await show_admin_panel(update, context)
 
 
 if __name__ == '__main__':
